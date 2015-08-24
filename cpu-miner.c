@@ -103,6 +103,7 @@ enum algos {
 	ALGO_SKEIN2,      /* Double skein (Woodcoin) */
 	ALGO_S3,          /* S3 */
 	ALGO_X11,         /* X11 */
+	ALGO_SIBCOIN,     /* Sibcoin */
 	ALGO_X13,         /* X13 */
 	ALGO_X14,         /* X14 */
 	ALGO_X15,         /* X15 Whirlpool */
@@ -142,6 +143,7 @@ static const char *algo_names[] = {
 	"skein2",
 	"s3",
 	"x11",
+        "sibcoin",
 	"x13",
 	"x14",
 	"x15",
@@ -278,6 +280,7 @@ Options:\n\
                           skein2       Double Skein (Woodcoin)\n\
                           s3           S3\n\
                           x11          X11\n\
+                          sibcoin      Sibcoin\n\
                           x13          X13\n\
                           x14          X14\n\
                           x15          X15\n\
@@ -1860,6 +1863,9 @@ static void *miner_thread(void *userdata)
 			case ALGO_X11:
 				max64 = 0x3ffff;
 				break;
+			case ALGO_SIBCOIN:
+				max64 = 0x3ffff;
+				break;
 			case ALGO_X13:
 				max64 = 0x3ffff;
 				break;
@@ -2007,6 +2013,10 @@ static void *miner_thread(void *userdata)
 			break;
 		case ALGO_X11:
 			rc = scanhash_x11(thr_id, work.data, work.target, max_nonce,
+					&hashes_done);
+			break;
+		case ALGO_SIBCOIN:
+			rc = scanhash_sib(thr_id, work.data, work.target, max_nonce,
 					&hashes_done);
 			break;
 		case ALGO_X13:

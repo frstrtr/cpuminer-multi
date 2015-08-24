@@ -266,6 +266,12 @@
     <ClCompile Include="algo\axiom.c">
       <Filter>algo</Filter>
     </ClCompile>
+    <ClCompile Include="algo\sibcoin.c">
+      <Filter>algo</Filter>
+    </ClCompile>
+    <ClCompile Include="algo\gost.c">
+      <Filter>algo</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="sha3\sph_blake.h">
