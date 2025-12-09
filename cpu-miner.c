@@ -1209,17 +1209,15 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 			}
 			
 			// Include version_bits parameter if version-rolling is enabled (BIP320)
+			// NOTE: For now, always send version_bits=0 (no modification) until we fix endianness
 			if (stratum.version_rolling && stratum.version_mask) {
-				uint32_t nversion = work->data[0];
-				// Extract version bits that were applied
-				uint32_t version_bits = nversion & stratum.version_mask;
-				
+				// Send version_bits=0 since we're not actually modifying the version
 				snprintf(s, JSON_BUF_LEN,
-						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%08x\"], \"id\":4}",
-						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr, version_bits);
+						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"00000000\"], \"id\":4}",
+						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr);
 				
 				if (opt_debug)
-					applog(LOG_DEBUG, "Submit with version_bits: 0x%08x", version_bits);
+					applog(LOG_DEBUG, "Submit with version_bits: 0x00000000 (not modifying version)");
 			} else {
 				snprintf(s, JSON_BUF_LEN,
 						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":4}",
@@ -1852,7 +1850,8 @@ static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 		}
 
 		// Apply version bits if version-rolling is enabled (ASICBoost/BIP320)
-		if (sctx->version_rolling && sctx->version_mask) {
+		// TEMPORARILY DISABLED - Testing if this breaks work generation
+		if (false && sctx->version_rolling && sctx->version_mask) {
 			// Use counter to vary version bits across different work units
 			uint32_t version_bits = ((sctx->version_counter++ & 0x1fff) << 13);
 			uint32_t current_version = work->data[0];
