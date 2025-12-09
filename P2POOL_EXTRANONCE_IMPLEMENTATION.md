@@ -1,0 +1,398 @@
+# P2Pool Extranonce Support - Implementation Guide
+
+## Overview
+
+Many X11 ASICs (Antminer D3, Innosilicon A5, etc.) **require** `mining.set_extranonce` support to function properly with stratum pools. Without this feature, P2Pool cannot support ASIC miners, severely limiting its usability.
+
+## The Problem
+
+### Why ASICs Need Extranonce Updates
+
+1. **Limited Nonce Space**: ASICs have hardware-optimized nonce iteration
+   - Can exhaust 32-bit nonce space in seconds
+   - Cannot easily change other header fields (timestamp, coinbase, etc.)
+
+2. **Hardware Limitations**: ASIC firmware expects dynamic extranonce
+   - Many ASICs have `mining.set_extranonce` hardcoded as required
+   - Cannot disable or work around this requirement
+   - Will disconnect or stall if not receiving extranonce updates
+
+3. **Current P2Pool Behavior**:
+   ```python
+   # Line 78-79 in stratum.py
+   if 'subscribe-extranonce' in extensions:
+       print 'Extension method subscribe-extranonce not implemented'
+   ```
+   - Acknowledges `subscribe-extranonce` but doesn't implement it
+   - ASICs receive new work (`mining.notify`) but with static extranonce
+   - ASICs exhaust nonce space and cannot continue
+
+### Impact
+
+| Miner Type | Current Status | Why |
+|------------|---------------|-----|
+| CPU Miners | ✅ Works | Can iterate through full nonce space |
+| GPU Miners | ✅ Works | Sufficient nonce space, slow enough |
+| ASIC Miners | ❌ Broken | Exhaust nonce space, require extranonce updates |
+
+## Required Implementation
+
+### 1. Support `mining.extranonce.subscribe` Extension
+
+**Location**: `stratum.py`, `rpc_configure()` method (around line 78)
+
+**Current Code**:
+```python
+if 'subscribe-extranonce' in extensions:
+    print 'Extension method subscribe-extranonce not implemented'
+```
+
+**Required Change**:
+```python
+if 'subscribe-extranonce' in extensions:
+    # Enable extranonce subscription for this connection
+    self.extranonce_subscribe = True
+    print '>>>ExtranOnce subscribed from %s' % (self.worker_ip)
+    # No return value needed - subscription is implicit
+```
+
+### 2. Implement `mining.set_extranonce` Method
+
+**Location**: `stratum.py`, add new RPC method
+
+**Implementation**:
+```python
+def rpc_set_extranonce(self, extranonce1, extranonce2_size):
+    """
+    Handle mining.set_extranonce from pool/proxy
+    
+    This is sent BY THE POOL to miners when extranonce changes.
+    Miners that subscribed to 'subscribe-extranonce' expect this.
+    
+    Args:
+        extranonce1: New extranonce1 value (hex string)
+        extranonce2_size: Size of extranonce2 in bytes (integer)
+    
+    Returns:
+        True on success
+    """
+    if not hasattr(self, 'extranonce_subscribe') or not self.extranonce_subscribe:
+        # Miner didn't subscribe to extranonce updates
+        return False
+    
+    # Update the extranonce for this connection
+    # Note: In P2Pool, extranonce is currently empty string
+    # This would need to be enhanced if P2Pool starts using extranonce1
+    
+    if extranonce1:
+        self.extranonce1 = extranonce1
+    else:
+        self.extranonce1 = ""
+    
+    if extranonce2_size != self.wb.COINBASE_NONCE_LENGTH:
+        print >>sys.stderr, 'WARNING: extranonce2_size mismatch: expected %d, got %d' % (
+            self.wb.COINBASE_NONCE_LENGTH, extranonce2_size)
+    
+    print '>>>Set extranonce: %s (size=%d) for %s' % (
+        extranonce1 if extranonce1 else "(empty)", 
+        extranonce2_size, 
+        self.worker_ip
+    )
+    
+    return True
+```
+
+### 3. Send `mining.set_extranonce` to Subscribed Miners
+
+**Location**: `stratum.py`, in `_send_work()` or similar
+
+P2Pool currently uses an empty extranonce1 (`""`), but when it changes (or periodically for ASICs), send updates:
+
+```python
+def _notify_extranonce_change(self, new_extranonce1=None):
+    """
+    Notify miners that subscribed to extranonce updates
+    Called when extranonce needs to change (e.g., reconnection, long mining session)
+    """
+    if not hasattr(self, 'extranonce_subscribe') or not self.extranonce_subscribe:
+        return
+    
+    # Use current or new extranonce1
+    extranonce1 = new_extranonce1 if new_extranonce1 is not None else ""
+    extranonce2_size = self.wb.COINBASE_NONCE_LENGTH
+    
+    # Send mining.set_extranonce notification to miner
+    self.other.svc_mining.rpc_set_extranonce(
+        extranonce1,
+        extranonce2_size
+    ).addErrback(lambda err: None)
+    
+    print '>>>Notified extranonce change to %s: %s (size=%d)' % (
+        self.worker_ip,
+        extranonce1 if extranonce1 else "(empty)",
+        extranonce2_size
+    )
+```
+
+### 4. Periodic Extranonce Updates for ASICs
+
+**Location**: `stratum.py`, in `_send_work()` method
+
+ASICs benefit from periodic extranonce updates even if the value doesn't change (resets their internal state):
+
+```python
+def _send_work(self):
+    try:
+        x, got_response = self.wb.get_work(*self.wb.preprocess_request(
+            '' if self.username is None else self.username))
+    except:
+        log.err()
+        self.transport.loseConnection()
+        return
+    
+    # ... existing difficulty and target code ...
+    
+    jobid = str(random.randrange(2**128))
+    
+    # For ASIC compatibility: periodically send extranonce updates
+    # Even with empty extranonce, this helps ASICs reset their state
+    if hasattr(self, 'extranonce_subscribe') and self.extranonce_subscribe:
+        if not hasattr(self, 'last_extranonce_update'):
+            self.last_extranonce_update = 0
+        
+        current_time = time.time()
+        # Send extranonce update every 30 seconds or on first work
+        if current_time - self.last_extranonce_update > 30:
+            self._notify_extranonce_change()
+            self.last_extranonce_update = current_time
+    
+    # ... rest of existing code ...
+```
+
+### 5. Update Initialization
+
+**Location**: `stratum.py`, `__init__()` method
+
+```python
+def __init__(self, wb, other, transport):
+    self.pool_version_mask = 0x1fffe000  # BIP320 standard mask for ASICBOOST
+    self.wb = wb
+    self.other = other
+    self.transport = transport
+    
+    self.username = None
+    self.worker_ip = transport.getPeer().host if transport else None
+    self.handler_map = expiring_dict.ExpiringDict(300)
+    
+    # Add extranonce support tracking
+    self.extranonce_subscribe = False
+    self.extranonce1 = ""
+    self.last_extranonce_update = 0
+    
+    self.watch_id = self.wb.new_work_event.watch(self._send_work)
+    # ... rest of existing code ...
+```
+
+## Protocol Specification
+
+### Mining.extranonce.subscribe Extension
+
+**Request** (from miner in `mining.configure`):
+```json
+{
+  "id": 2,
+  "method": "mining.configure",
+  "params": [
+    ["subscribe-extranonce"],
+    {}
+  ]
+}
+```
+
+**Response** (from pool):
+```json
+{
+  "id": 2,
+  "result": {
+    "subscribe-extranonce": true
+  }
+}
+```
+
+### Mining.set_extranonce Notification
+
+**Notification** (from pool to miner, no ID, miner doesn't respond):
+```json
+{
+  "method": "mining.set_extranonce",
+  "params": [
+    "",           // extranonce1 (hex string, can be empty)
+    4             // extranonce2_size (integer)
+  ]
+}
+```
+
+**When to Send**:
+1. After miner subscribes to extranonce updates
+2. When extranonce1 actually changes (if P2Pool implements non-empty extranonce)
+3. Periodically (every 30-60 seconds) to help ASICs reset state
+4. After reconnection or connection resumption
+
+## Testing Checklist
+
+### Phase 1: Basic Implementation
+- [ ] Add `extranonce_subscribe` flag to connection state
+- [ ] Handle `subscribe-extranonce` in `rpc_configure()`
+- [ ] Implement `rpc_set_extranonce()` method
+- [ ] Test with CPU miner (should not break anything)
+
+### Phase 2: Notification Support
+- [ ] Implement `_notify_extranonce_change()` helper
+- [ ] Send `mining.set_extranonce` after subscription
+- [ ] Add periodic updates (every 30 seconds)
+- [ ] Test with CPU miner with extranonce subscription enabled
+
+### Phase 3: ASIC Testing
+- [ ] Test with Antminer D3 (X11 ASIC)
+- [ ] Test with Innosilicon A5 (X11 ASIC)
+- [ ] Test with Baikal BK-X (X11 ASIC)
+- [ ] Verify shares are submitted continuously
+- [ ] Verify no disconnections or stalls
+- [ ] Monitor hashrate remains stable
+
+### Phase 4: Stress Testing
+- [ ] Test with multiple ASICs simultaneously
+- [ ] Test with mixed CPU/GPU/ASIC connections
+- [ ] Test long-running sessions (>24 hours)
+- [ ] Test reconnection scenarios
+- [ ] Monitor pool performance impact
+
+## Validation with cpuminer-multi
+
+The cpuminer-multi already supports `mining.set_extranonce`:
+
+**Code** (`util.c`, line 2299):
+```c
+if (!strcasecmp(method, "mining.set_extranonce")) {
+    ret = stratum_parse_extranonce(sctx, params, 0);
+    goto out;
+}
+```
+
+**Test Command**:
+```bash
+./cpuminer -a x11 \
+  -o stratum+tcp://192.168.86.244:7903 \
+  -u XsFe6mGpLM3R6ZieYJXhsmGyYg8jn3Lth6 \
+  -p x \
+  --extranonce \
+  -D
+```
+
+**Expected Log Output** (after implementation):
+```
+[2025-12-09 18:00:00] Starting Stratum on stratum+tcp://192.168.86.244:7903
+[2025-12-09 18:00:00] ✓ ASICBoost version-rolling enabled: mask=0x1fffe000 (BE) = 0x00e0ff1f (LE)
+[2025-12-09 18:00:00] extranonce.subscribe response received
+[2025-12-09 18:00:00] Stratum difficulty set to 0.0912865
+[2025-12-09 18:00:30] Extranonce updated:  (size=4)
+[2025-12-09 18:01:00] Extranonce updated:  (size=4)
+```
+
+## Implementation Priority
+
+### High Priority (Required for ASICs)
+1. ✅ Handle `subscribe-extranonce` in `rpc_configure()` - **15 minutes**
+2. ✅ Implement `rpc_set_extranonce()` method - **30 minutes**
+3. ✅ Send initial extranonce notification after subscription - **15 minutes**
+
+**Estimated Time**: 1 hour
+
+### Medium Priority (ASIC Optimization)
+4. ✅ Implement periodic extranonce updates - **20 minutes**
+5. ✅ Add state tracking and logging - **10 minutes**
+
+**Estimated Time**: 30 minutes
+
+### Low Priority (Enhancement)
+6. ⬜ Implement non-empty extranonce1 (currently always empty)
+7. ⬜ Dynamic extranonce1 based on worker count
+8. ⬜ Extranonce space management
+
+**Estimated Time**: 2-4 hours (optional)
+
+## Code Changes Summary
+
+### Minimum Required Changes (3 locations)
+
+1. **`__init__` method** - Add extranonce state tracking:
+   ```python
+   self.extranonce_subscribe = False
+   self.extranonce1 = ""
+   ```
+
+2. **`rpc_configure` method** - Handle subscription:
+   ```python
+   if 'subscribe-extranonce' in extensions:
+       self.extranonce_subscribe = True
+   ```
+
+3. **New method** - Handle updates:
+   ```python
+   def rpc_set_extranonce(self, extranonce1, extranonce2_size):
+       # Implementation above
+   ```
+
+### Recommended Changes (2 additional locations)
+
+4. **`_send_work` method** - Periodic updates:
+   ```python
+   if hasattr(self, 'extranonce_subscribe') and self.extranonce_subscribe:
+       # Send periodic updates
+   ```
+
+5. **New helper method** - Notification sender:
+   ```python
+   def _notify_extranonce_change(self, new_extranonce1=None):
+       # Implementation above
+   ```
+
+## References
+
+- **NiceHash Extranonce Subscribe**: https://github.com/nicehash/Specifications/blob/master/NiceHash_extranonce_subscribe_extension.txt
+- **Stratum Extensions**: https://en.bitcoin.it/wiki/Stratum_mining_protocol#mining.extranonce.subscribe
+- **BIP310 (Stratum v2)**: https://github.com/bitcoin/bips/blob/master/bip-0310.mediawiki
+- **cpuminer-multi implementation**: `util.c:2299`, `stratum_parse_extranonce()`
+- **Antminer Documentation**: Requires `mining.set_extranonce` for proper operation
+
+## Expected Benefits
+
+### For Miners
+- ✅ ASIC support - Antminer D3, Innosilicon A5, Baikal can connect
+- ✅ Stable hashrate - No nonce space exhaustion
+- ✅ Better compatibility - Works with more mining software
+
+### For P2Pool
+- ✅ Increased hashrate - ASICs can contribute
+- ✅ Network security - More diverse miner base
+- ✅ Competitiveness - Feature parity with other pools
+
+### For Network
+- ✅ Decentralization - ASICs can use P2Pool instead of centralized pools
+- ✅ Resilience - More hashrate on decentralized infrastructure
+
+## Conclusion
+
+Implementing `mining.set_extranonce` support is **critical** for P2Pool to support ASIC miners. The implementation is straightforward (1-2 hours of work) and provides significant value.
+
+**Without this feature**: P2Pool is limited to CPU/GPU miners only
+**With this feature**: P2Pool becomes viable for all X11 miners including ASICs
+
+The code changes are minimal, well-documented above, and can be tested incrementally with existing CPU miners before ASIC testing.
+
+---
+
+**Document Status**: Ready for Implementation  
+**Estimated Implementation Time**: 1-2 hours  
+**Testing Time**: 1-2 hours  
+**Priority**: HIGH - Blocking ASIC support
