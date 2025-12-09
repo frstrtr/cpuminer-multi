@@ -1209,15 +1209,19 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 			}
 			
 			// Include version_bits parameter if version-rolling is enabled (BIP320)
-			// NOTE: For now, always send version_bits=0 (no modification) until we fix endianness
 			if (stratum.version_rolling && stratum.version_mask) {
-				// Send version_bits=0 since we're not actually modifying the version
+				// Extract version_bits from work->data[0] (LE) and convert to BE for submission
+				uint32_t nversion_le = work->data[0];
+				uint32_t nversion_be = swab32(nversion_le);
+				uint32_t mask_be = swab32(stratum.version_mask);
+				uint32_t version_bits = nversion_be & mask_be;
+				
 				snprintf(s, JSON_BUF_LEN,
-						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"00000000\"], \"id\":4}",
-						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr);
+						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%08x\"], \"id\":4}",
+						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr, version_bits);
 				
 				if (opt_debug)
-					applog(LOG_DEBUG, "Submit with version_bits: 0x00000000 (not modifying version)");
+					applog(LOG_DEBUG, "Submit with version_bits: 0x%08x (BE)", version_bits);
 			} else {
 				snprintf(s, JSON_BUF_LEN,
 						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":4}",
@@ -1850,16 +1854,19 @@ static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 		}
 
 		// Apply version bits if version-rolling is enabled (ASICBoost/BIP320)
-		// TEMPORARILY DISABLED - Testing if this breaks work generation
-		if (false && sctx->version_rolling && sctx->version_mask) {
-			// Use counter to vary version bits across different work units
-			uint32_t version_bits = ((sctx->version_counter++ & 0x1fff) << 13);
+		if (sctx->version_rolling && sctx->version_mask) {
+			// version_mask is already in LE format (swapped in stratum_configure)
+			// Generate version bits: 13-bit counter in bits 13-25
+			// In LE: bits 13-25 of LE word = need to shift appropriately
+			uint32_t counter = sctx->version_counter++ & 0x1fff;
+			// Create version_bits in LE format matching the LE mask
+			uint32_t version_bits_le = swab32(counter << 13);
 			uint32_t current_version = work->data[0];
 			work->data[0] = (current_version & ~sctx->version_mask) | 
-			                (version_bits & sctx->version_mask);
-			if (opt_debug && (sctx->version_counter & 0xFF) == 1) {
-				applog(LOG_DEBUG, "Version rolling: 0x%08x -> 0x%08x (mask=0x%08x)",
-					current_version, work->data[0], sctx->version_mask);
+			                (version_bits_le & sctx->version_mask);
+			if (opt_debug && (counter & 0xFF) == 1) {
+				applog(LOG_DEBUG, "Version rolling: 0x%08x -> 0x%08x (LE mask=0x%08x, counter=%u)",
+					current_version, work->data[0], sctx->version_mask, counter);
 			}
 		}
 

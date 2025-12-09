@@ -1463,10 +1463,13 @@ bool stratum_configure(struct stratum_ctx *sctx)
 			if (json_is_true(vr) && mask) {
 				const char *mask_str = json_string_value(mask);
 				if (mask_str) {
+					uint32_t mask_be = strtoul(mask_str, NULL, 16);
 					sctx->version_rolling = true;
-					sctx->version_mask = strtoul(mask_str, NULL, 16);
+					// Store mask in LE format since work->data[0] is LE
+					sctx->version_mask = swab32(mask_be);
 					sctx->version_counter = 0;
-					applog(LOG_INFO, "✓ ASICBoost version-rolling enabled: mask=0x%08x", sctx->version_mask);
+					applog(LOG_INFO, "✓ ASICBoost version-rolling enabled: mask=0x%08x (BE) = 0x%08x (LE)", 
+					       mask_be, sctx->version_mask);
 				} else {
 					sctx->version_rolling = false;
 				}
