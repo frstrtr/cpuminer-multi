@@ -1376,69 +1376,118 @@ bool stratum_configure(struct stratum_ctx *sctx)
 		"\"version-rolling.min-bit-count\": 2}]}",
 		sctx->next_id++);
 
+	int expected_id = sctx->next_id - 1; // We already incremented it in sprintf
+
 	if (!stratum_send_line(sctx, s)) {
 		applog(LOG_DEBUG, "Failed to send mining.configure");
 		ret = true; // Not fatal, continue without version-rolling
 		goto out;
 	}
 
-	// Wait for response
-	if (!socket_full(sctx->sock, 10)) {
-		applog(LOG_DEBUG, "mining.configure timeout (pool may not support it)");
-		ret = true; // Not fatal
-		goto out;
-	}
+	// Keep reading until we find response with matching ID or timeout
+	time_t start_time = time(NULL);
+	while (time(NULL) - start_time < 10) {
+		if (!socket_full(sctx->sock, 1)) {
+			continue; // No data yet
+		}
 
-	sret = stratum_recv_line(sctx);
-	if (!sret) {
-		ret = true; // Not fatal
-		goto out;
-	}
+		sret = stratum_recv_line(sctx);
+		if (!sret) {
+			ret = true; // Not fatal
+			goto out;
+		}
 
-	val = JSON_LOADS(sret, &err);
-	if (!val) {
-		applog(LOG_DEBUG, "JSON decode failed for mining.configure response");
-		ret = true; // Not fatal
-		goto out;
-	}
+		val = JSON_LOADS(sret, &err);
+		if (!val) {
+			applog(LOG_DEBUG, "JSON decode failed: %s", sret);
+			free(sret);
+			sret = NULL;
+			continue;
+		}
 
-	json_t *result = json_object_get(val, "result");
-	json_t *error = json_object_get(val, "error");
-
-	// Check if there's an error response
-	if (error && !json_is_null(error)) {
-		if (opt_debug)
-			applog(LOG_DEBUG, "Pool does not support mining.configure");
-		sctx->version_rolling = false;
-		ret = true;
-		goto out;
-	}
-
-	if (result && json_is_object(result)) {
-		json_t *vr = json_object_get(result, "version-rolling");
-		json_t *mask = json_object_get(result, "version-rolling.mask");
-		
-		if (json_is_true(vr) && mask) {
-			const char *mask_str = json_string_value(mask);
-			if (mask_str) {
-				sctx->version_rolling = true;
-				sctx->version_mask = strtoul(mask_str, NULL, 16);
-				sctx->version_counter = 0;
-				applog(LOG_INFO, "✓ ASICBoost version-rolling enabled: mask=0x%08x", sctx->version_mask);
-			} else {
-				sctx->version_rolling = false;
-			}
-			ret = true;
-		} else {
+		// Check if this is a notification (has 'method') or response (has 'result' or 'error')
+		const char *method = json_string_value(json_object_get(val, "method"));
+		if (method) {
+			// This is an unsolicited notification (mining.notify, mining.set_difficulty)
+			// Handle it and continue waiting for our response
 			if (opt_debug)
-				applog(LOG_DEBUG, "Pool does not support version-rolling");
+				applog(LOG_DEBUG, "Got notification %s while waiting for configure response", method);
+			stratum_handle_method(sctx, sret);
+			json_decref(val);
+			val = NULL;
+			free(sret);
+			sret = NULL;
+			continue;
+		}
+
+		// This is a response - check if ID matches
+		json_t *id_json = json_object_get(val, "id");
+		if (!id_json || !json_is_integer(id_json)) {
+			applog(LOG_DEBUG, "Response missing ID");
+			json_decref(val);
+			val = NULL;
+			free(sret);
+			sret = NULL;
+			continue;
+		}
+
+		int received_id = json_integer_value(id_json);
+		if (received_id != expected_id) {
+			// Not our response, keep waiting
+			if (opt_debug)
+				applog(LOG_DEBUG, "Got response id=%d, waiting for id=%d", received_id, expected_id);
+			json_decref(val);
+			val = NULL;
+			free(sret);
+			sret = NULL;
+			continue;
+		}
+
+		// Found our response!
+		json_t *result = json_object_get(val, "result");
+		json_t *error = json_object_get(val, "error");
+
+		// Check if there's an error response
+		if (error && !json_is_null(error)) {
+			if (opt_debug)
+				applog(LOG_DEBUG, "Pool does not support mining.configure");
+			sctx->version_rolling = false;
+			ret = true;
+			goto out;
+		}
+
+		if (result && json_is_object(result)) {
+			json_t *vr = json_object_get(result, "version-rolling");
+			json_t *mask = json_object_get(result, "version-rolling.mask");
+			
+			if (json_is_true(vr) && mask) {
+				const char *mask_str = json_string_value(mask);
+				if (mask_str) {
+					sctx->version_rolling = true;
+					sctx->version_mask = strtoul(mask_str, NULL, 16);
+					sctx->version_counter = 0;
+					applog(LOG_INFO, "✓ ASICBoost version-rolling enabled: mask=0x%08x", sctx->version_mask);
+				} else {
+					sctx->version_rolling = false;
+				}
+				ret = true;
+			} else {
+				if (opt_debug)
+					applog(LOG_DEBUG, "Pool does not support version-rolling");
+				sctx->version_rolling = false;
+				ret = true;
+			}
+		} else {
 			sctx->version_rolling = false;
 			ret = true;
 		}
-	} else {
-		sctx->version_rolling = false;
-		ret = true;
+		goto out;
 	}
+
+	// Timeout
+	applog(LOG_DEBUG, "mining.configure timeout (pool may not support it)");
+	sctx->version_rolling = false;
+	ret = true; // Not fatal
 
 out:
 	free(s);
@@ -1530,20 +1579,53 @@ bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *p
 		goto out;
 	}
 
-	sret = stratum_recv_line(sctx);
-	if (sret) {
+	// Keep reading until we find response with id=3 or timeout
+	time_t start_time = time(NULL);
+	while (time(NULL) - start_time < 3) {
+		if (!socket_full(sctx->sock, 1))
+			continue;
+
+		sret = stratum_recv_line(sctx);
+		if (!sret)
+			break;
+
 		json_t *extra = JSON_LOADS(sret, &err);
 		if (!extra) {
 			applog(LOG_WARNING, "JSON decode failed(%d): %s", err.line, err.text);
-		} else {
-			if (json_integer_value(json_object_get(extra, "id")) != 3) {
-				// we receive a standard method if extranonce is ignored
-				if (!stratum_handle_method(sctx, sret))
-					applog(LOG_WARNING, "Stratum answer id is not correct!");
-			}
-			json_decref(extra);
+			free(sret);
+			break;
 		}
-		free(sret);
+
+		// Check if this is a notification (has 'method') or response
+		const char *method = json_string_value(json_object_get(extra, "method"));
+		if (method) {
+			// Unsolicited notification - handle it and keep waiting
+			if (opt_debug)
+				applog(LOG_DEBUG, "Got notification %s while waiting for extranonce response", method);
+			stratum_handle_method(sctx, sret);
+			json_decref(extra);
+			free(sret);
+			sret = NULL;
+			continue;
+		}
+
+		// This is a response - check ID
+		int response_id = json_integer_value(json_object_get(extra, "id"));
+		if (response_id == 3) {
+			// Found our extranonce.subscribe response
+			if (opt_debug)
+				applog(LOG_DEBUG, "extranonce.subscribe response received");
+			json_decref(extra);
+			free(sret);
+			break;
+		} else {
+			// Response for different request
+			if (opt_debug)
+				applog(LOG_DEBUG, "Got response id=%d, waiting for id=3", response_id);
+			json_decref(extra);
+			free(sret);
+			sret = NULL;
+		}
 	}
 
 out:
