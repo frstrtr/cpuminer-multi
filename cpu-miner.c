@@ -1207,9 +1207,24 @@ static bool submit_upstream_work(CURL *curl, struct work *work)
 			} else {
 				xnonce2str = abin2hex(work->xnonce2, work->xnonce2_len);
 			}
-			snprintf(s, JSON_BUF_LEN,
-					"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":4}",
-					rpc_user, work->job_id, xnonce2str, ntimestr, noncestr);
+			
+			// Include version_bits parameter if version-rolling is enabled (BIP320)
+			if (stratum.version_rolling && stratum.version_mask) {
+				uint32_t nversion = work->data[0];
+				// Extract version bits that were applied
+				uint32_t version_bits = nversion & stratum.version_mask;
+				
+				snprintf(s, JSON_BUF_LEN,
+						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\", \"%08x\"], \"id\":4}",
+						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr, version_bits);
+				
+				if (opt_debug)
+					applog(LOG_DEBUG, "Submit with version_bits: 0x%08x", version_bits);
+			} else {
+				snprintf(s, JSON_BUF_LEN,
+						"{\"method\": \"mining.submit\", \"params\": [\"%s\", \"%s\", \"%s\", \"%s\", \"%s\"], \"id\":4}",
+						rpc_user, work->job_id, xnonce2str, ntimestr, noncestr);
+			}
 			free(xnonce2str);
 		}
 
@@ -1834,6 +1849,19 @@ static void stratum_gen_work(struct stratum_ctx *sctx, struct work *work)
 			// required ?
 			work->data[20] = 0x80000000;
 			work->data[31] = 0x00000280;
+		}
+
+		// Apply version bits if version-rolling is enabled (ASICBoost/BIP320)
+		if (sctx->version_rolling && sctx->version_mask) {
+			// Use counter to vary version bits across different work units
+			uint32_t version_bits = ((sctx->version_counter++ & 0x1fff) << 13);
+			uint32_t current_version = work->data[0];
+			work->data[0] = (current_version & ~sctx->version_mask) | 
+			                (version_bits & sctx->version_mask);
+			if (opt_debug && (sctx->version_counter & 0xFF) == 1) {
+				applog(LOG_DEBUG, "Version rolling: 0x%08x -> 0x%08x (mask=0x%08x)",
+					current_version, work->data[0], sctx->version_mask);
+			}
 		}
 
 		if (opt_showdiff || opt_max_diff > 0.)

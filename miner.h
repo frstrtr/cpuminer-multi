@@ -456,6 +456,12 @@ struct stratum_ctx {
 	pthread_mutex_t work_lock;
 
 	int bloc_height;
+
+	// ASICBoost / Version Rolling (BIP320)
+	bool version_rolling;      // Is version-rolling enabled?
+	uint32_t version_mask;     // Mask from pool (e.g., 0x1fffe000)
+	uint32_t version_counter;  // Counter for version bits
+	int next_id;               // ID counter for JSON-RPC requests
 };
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout);
@@ -464,6 +470,7 @@ char *stratum_recv_line(struct stratum_ctx *sctx);
 bool stratum_connect(struct stratum_ctx *sctx, const char *url);
 void stratum_disconnect(struct stratum_ctx *sctx);
 bool stratum_subscribe(struct stratum_ctx *sctx);
+bool stratum_configure(struct stratum_ctx *sctx);
 bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *pass);
 bool stratum_handle_method(struct stratum_ctx *sctx, const char *s);
 

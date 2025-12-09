@@ -1353,6 +1353,103 @@ out:
 	return ret;
 }
 
+bool stratum_configure(struct stratum_ctx *sctx)
+{
+	char *s, *sret = NULL;
+	json_t *val = NULL;
+	json_error_t err;
+	bool ret = false;
+
+	if (jsonrpc_2)
+		return true;
+
+	// Initialize next_id if not set
+	if (sctx->next_id == 0)
+		sctx->next_id = 2;
+
+	// Request version-rolling with 0x1fffe000 mask (13 bits)
+	s = (char*) malloc(512);
+	sprintf(s,
+		"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
+		"[[\"version-rolling\"], "
+		"{\"version-rolling.mask\": \"1fffe000\", "
+		"\"version-rolling.min-bit-count\": 2}]}",
+		sctx->next_id++);
+
+	if (!stratum_send_line(sctx, s)) {
+		applog(LOG_DEBUG, "Failed to send mining.configure");
+		ret = true; // Not fatal, continue without version-rolling
+		goto out;
+	}
+
+	// Wait for response
+	if (!socket_full(sctx->sock, 10)) {
+		applog(LOG_DEBUG, "mining.configure timeout (pool may not support it)");
+		ret = true; // Not fatal
+		goto out;
+	}
+
+	sret = stratum_recv_line(sctx);
+	if (!sret) {
+		ret = true; // Not fatal
+		goto out;
+	}
+
+	val = JSON_LOADS(sret, &err);
+	if (!val) {
+		applog(LOG_DEBUG, "JSON decode failed for mining.configure response");
+		ret = true; // Not fatal
+		goto out;
+	}
+
+	json_t *result = json_object_get(val, "result");
+	json_t *error = json_object_get(val, "error");
+
+	// Check if there's an error response
+	if (error && !json_is_null(error)) {
+		if (opt_debug)
+			applog(LOG_DEBUG, "Pool does not support mining.configure");
+		sctx->version_rolling = false;
+		ret = true;
+		goto out;
+	}
+
+	if (result && json_is_object(result)) {
+		json_t *vr = json_object_get(result, "version-rolling");
+		json_t *mask = json_object_get(result, "version-rolling.mask");
+		
+		if (json_is_true(vr) && mask) {
+			const char *mask_str = json_string_value(mask);
+			if (mask_str) {
+				sctx->version_rolling = true;
+				sctx->version_mask = strtoul(mask_str, NULL, 16);
+				sctx->version_counter = 0;
+				applog(LOG_INFO, "✓ ASICBoost version-rolling enabled: mask=0x%08x", sctx->version_mask);
+			} else {
+				sctx->version_rolling = false;
+			}
+			ret = true;
+		} else {
+			if (opt_debug)
+				applog(LOG_DEBUG, "Pool does not support version-rolling");
+			sctx->version_rolling = false;
+			ret = true;
+		}
+	} else {
+		sctx->version_rolling = false;
+		ret = true;
+	}
+
+out:
+	free(s);
+	if (sret)
+		free(sret);
+	if (val)
+		json_decref(val);
+
+	return ret;
+}
+
 extern bool opt_extranonce;
 
 bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *pass)
@@ -1362,6 +1459,11 @@ bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *p
 	json_error_t err;
 	bool ret = false;
 	int req_id = 0;
+
+	// Try to negotiate version-rolling after successful subscribe
+	if (!jsonrpc_2) {
+		stratum_configure(sctx);
+	}
 
 	if (jsonrpc_2) {
 		s = (char*) malloc(300 + strlen(user) + strlen(pass));
