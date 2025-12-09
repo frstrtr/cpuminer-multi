@@ -1,5 +1,18 @@
 # ASICBoost/Version-Rolling Testing Guide
 
+## ⚠️ IMPORTANT: Protocol Stub Only - No Performance Benefit
+
+**This is a PROTOCOL IMPLEMENTATION for testing purposes only.**
+
+- ❌ **NO speed optimization** - This does NOT make mining faster
+- ❌ **NO midstate reuse** - Core ASICBoost optimization not implemented
+- ❌ **NO computational benefit** - CPU mining performance unchanged
+- ✅ **Protocol testing only** - For validating P2Pool ASICBoost infrastructure
+
+ASICBoost speed benefits require ASIC hardware with midstate caching. This implementation only speaks the version-rolling protocol correctly for testing pool implementations.
+
+---
+
 ## Implementation Summary
 
 This patch adds BIP320 version-rolling support to cpuminer-multi for testing P2Pool ASICBoost implementations. The miner now:

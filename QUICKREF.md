@@ -1,5 +1,18 @@
 # ASICBoost/Version-Rolling Quick Reference
 
+## ⚠️ WARNING: Protocol Stub Only
+
+**This is NOT a performance optimization!**
+
+- ❌ Mining is NOT faster
+- ❌ No midstate reuse (core ASICBoost feature)
+- ❌ No computational benefit
+- ✅ Protocol testing only
+
+This implementation only speaks the BIP320 protocol for testing P2Pool infrastructure.
+
+---
+
 ## What Was Implemented
 
 ✅ **BIP320 Version-Rolling Support** for testing P2Pool ASICBoost implementations
