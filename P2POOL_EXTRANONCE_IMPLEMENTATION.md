@@ -269,6 +269,28 @@ def __init__(self, wb, other, transport):
 
 ## Validation with cpuminer-multi
 
+### ✅ Response ID Handling Fixed
+
+**IMPORTANT**: The `cpuminer-multi` in this repository (branch `asicboost-protocol-testing`) has been **fixed** to properly handle stratum protocol responses!
+
+**The Fix** (`util.c`, lines 1385-1448 for `stratum_configure`, lines 1533-1570 for `stratum_authorize`):
+- Loops until finding response with matching ID
+- Handles unsolicited notifications (`mining.notify`, `mining.set_difficulty`) while waiting
+- No more false "Stratum answer id is not correct!" errors
+
+**Working Example**:
+```
+[2025-12-09 17:24:25] Starting Stratum on stratum+tcp://192.168.86.244:7903
+[2025-12-09 17:24:25] Got notification mining.set_difficulty while waiting for configure response
+[2025-12-09 17:24:25] Got notification mining.notify while waiting for configure response
+[2025-12-09 17:24:25] ✓ ASICBoost version-rolling enabled: mask=0x1fffe000 (BE) = 0x00e0ff1f (LE)
+[2025-12-09 17:24:25] Got notification mining.set_difficulty while waiting for extranonce response
+[2025-12-09 17:24:25] Got notification mining.notify while waiting for extranonce response
+[2025-12-09 17:24:25] extranonce.subscribe response received
+```
+
+### Extranonce Support
+
 The cpuminer-multi already supports `mining.set_extranonce`:
 
 **Code** (`util.c`, line 2299):
@@ -289,15 +311,34 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
   -D
 ```
 
-**Expected Log Output** (after implementation):
+**Current Log Output** (extranonce.subscribe working, waiting for set_extranonce notifications):
 ```
-[2025-12-09 18:00:00] Starting Stratum on stratum+tcp://192.168.86.244:7903
-[2025-12-09 18:00:00] ✓ ASICBoost version-rolling enabled: mask=0x1fffe000 (BE) = 0x00e0ff1f (LE)
-[2025-12-09 18:00:00] extranonce.subscribe response received
-[2025-12-09 18:00:00] Stratum difficulty set to 0.0912865
+[2025-12-09 17:24:25] Starting Stratum on stratum+tcp://192.168.86.244:7903
+[2025-12-09 17:24:25] ✓ ASICBoost version-rolling enabled: mask=0x1fffe000 (BE) = 0x00e0ff1f (LE)
+[2025-12-09 17:24:25] extranonce.subscribe response received
+[2025-12-09 17:24:25] Stratum difficulty set to 0.0912865
+```
+
+**Expected After Implementation**:
+```
 [2025-12-09 18:00:30] Extranonce updated:  (size=4)
 [2025-12-09 18:01:00] Extranonce updated:  (size=4)
 ```
+
+### Testing Repository
+
+**Repository**: https://github.com/frstrtr/cpuminer-multi  
+**Branch**: `asicboost-protocol-testing`  
+**Status**: ✅ Fully working with P2Pool
+
+**What's Fixed**:
+- ✅ Proper response ID matching
+- ✅ Notification handling during response wait
+- ✅ ASICBoost/BIP320 support with correct endianness
+- ✅ Extranonce subscribe support
+- ✅ 6-parameter submit format
+
+**Use this miner to validate your P2Pool implementation!**
 
 ## Implementation Priority
 
@@ -381,18 +422,75 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
 - ✅ Decentralization - ASICs can use P2Pool instead of centralized pools
 - ✅ Resilience - More hashrate on decentralized infrastructure
 
+## Important Note for Other Miners
+
+### Most Miners Have the Same Bug!
+
+Many miners (including older versions of cpuminer-multi) incorrectly handle stratum responses:
+
+**Buggy Pattern**:
+```c
+// WRONG - assumes next message matches request ID
+send_request(id=2, "mining.configure");
+response = read_one_line();
+if (response.id != 2)
+    error("ID mismatch!");  // FALSE ALARM if got mining.notify!
+```
+
+**Correct Pattern** (implemented in our cpuminer-multi):
+```c
+// RIGHT - keeps reading until finding matching response
+send_request(id=2, "mining.configure");
+while (!timeout) {
+    msg = read_one_line();
+    
+    if (has_method(msg)) {
+        // Unsolicited notification - handle and continue
+        handle_notification(msg);  // mining.notify, set_difficulty, etc.
+        continue;
+    }
+    
+    if (is_response(msg) && msg.id == 2) {
+        return msg;  // Found our response!
+    }
+}
+```
+
+### Protocol Reality
+
+The stratum protocol **allows unsolicited notifications at ANY time**:
+- `mining.notify` - New work (random ID)
+- `mining.set_difficulty` - Difficulty change (random ID)
+- `mining.set_extranonce` - Extranonce update (random ID)
+
+These can arrive **while waiting for response to mining.configure**!
+
+### Testing Tool
+
+Use our fixed cpuminer-multi to validate your pool:
+- **Repository**: https://github.com/frstrtr/cpuminer-multi
+- **Branch**: `asicboost-protocol-testing`
+- **Features**: Proper ID matching, ASICBoost, extranonce support
+
 ## Conclusion
 
 Implementing `mining.set_extranonce` support is **critical** for P2Pool to support ASIC miners. The implementation is straightforward (1-2 hours of work) and provides significant value.
 
-**Without this feature**: P2Pool is limited to CPU/GPU miners only
+**Without this feature**: P2Pool is limited to CPU/GPU miners only  
 **With this feature**: P2Pool becomes viable for all X11 miners including ASICs
 
-The code changes are minimal, well-documented above, and can be tested incrementally with existing CPU miners before ASIC testing.
+The code changes are minimal, well-documented above, and can be tested incrementally with the **fixed cpuminer-multi** from this repository before ASIC testing.
+
+### Validation Strategy
+
+1. **Phase 1**: Test with our cpuminer-multi (has proper response handling)
+2. **Phase 2**: Test with other CPU miners (may need fixes)
+3. **Phase 3**: Test with ASICs (requires set_extranonce notifications)
 
 ---
 
 **Document Status**: Ready for Implementation  
 **Estimated Implementation Time**: 1-2 hours  
 **Testing Time**: 1-2 hours  
-**Priority**: HIGH - Blocking ASIC support
+**Priority**: HIGH - Blocking ASIC support  
+**Testing Tool**: https://github.com/frstrtr/cpuminer-multi (branch: asicboost-protocol-testing)
