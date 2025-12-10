@@ -308,6 +308,8 @@ extern bool opt_protocol;
 extern bool opt_showdiff;
 extern bool opt_quiet;
 extern bool opt_redirect;
+extern bool opt_force_nicehash_extranonce;
+extern bool opt_force_bip310_extranonce;
 extern int opt_priority;
 extern int opt_timeout;
 extern bool want_longpoll;
@@ -462,6 +464,9 @@ struct stratum_ctx {
 	uint32_t version_mask;     // Mask from pool (e.g., 0x1fffe000)
 	uint32_t version_counter;  // Counter for version bits
 	int next_id;               // ID counter for JSON-RPC requests
+	
+	// Extranonce subscription (supports both BIP310 and NiceHash protocols)
+	bool extranonce_subscribed; // Did pool accept extranonce subscription?
 };
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout);

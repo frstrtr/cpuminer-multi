@@ -45,6 +45,9 @@
 #include "elist.h"
 
 extern pthread_mutex_t stats_lock;
+extern bool opt_extranonce;
+extern bool opt_force_nicehash_extranonce;
+extern bool opt_force_bip310_extranonce;
 
 struct data_buffer {
 	void		*buf;
@@ -1367,14 +1370,25 @@ bool stratum_configure(struct stratum_ctx *sctx)
 	if (sctx->next_id == 0)
 		sctx->next_id = 2;
 
-	// Request version-rolling with 0x1fffe000 mask (13 bits)
+	// Request version-rolling and extranonce subscription (BIP310 protocol)
 	s = (char*) malloc(512);
-	sprintf(s,
-		"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
-		"[[\"version-rolling\"], "
-		"{\"version-rolling.mask\": \"1fffe000\", "
-		"\"version-rolling.min-bit-count\": 2}]}",
-		sctx->next_id++);
+	if (opt_extranonce && !opt_force_nicehash_extranonce) {
+		// Request both version-rolling and subscribe-extranonce (unless forced to NiceHash only)
+		sprintf(s,
+			"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
+			"[[\"version-rolling\", \"subscribe-extranonce\"], "
+			"{\"version-rolling.mask\": \"1fffe000\", "
+			"\"version-rolling.min-bit-count\": 2}]}",
+			sctx->next_id++);
+	} else {
+		// Request only version-rolling (extranonce disabled or forced to NiceHash)
+		sprintf(s,
+			"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
+			"[[\"version-rolling\"], "
+			"{\"version-rolling.mask\": \"1fffe000\", "
+			"\"version-rolling.min-bit-count\": 2}]}",
+			sctx->next_id++);
+	}
 
 	int expected_id = sctx->next_id - 1; // We already incremented it in sprintf
 
@@ -1459,7 +1473,9 @@ bool stratum_configure(struct stratum_ctx *sctx)
 		if (result && json_is_object(result)) {
 			json_t *vr = json_object_get(result, "version-rolling");
 			json_t *mask = json_object_get(result, "version-rolling.mask");
+			json_t *se = json_object_get(result, "subscribe-extranonce");
 			
+			// Check version-rolling support
 			if (json_is_true(vr) && mask) {
 				const char *mask_str = json_string_value(mask);
 				if (mask_str) {
@@ -1473,13 +1489,20 @@ bool stratum_configure(struct stratum_ctx *sctx)
 				} else {
 					sctx->version_rolling = false;
 				}
-				ret = true;
 			} else {
 				if (opt_debug)
 					applog(LOG_DEBUG, "Pool does not support version-rolling");
 				sctx->version_rolling = false;
-				ret = true;
 			}
+			
+			// Check subscribe-extranonce support (BIP310 protocol)
+			if (opt_extranonce && json_is_true(se)) {
+				sctx->extranonce_subscribed = true;
+				if (opt_debug)
+					applog(LOG_DEBUG, "✓ Extranonce subscription enabled (BIP310 via mining.configure)");
+			}
+			
+			ret = true;
 		} else {
 			sctx->version_rolling = false;
 			ret = true;
@@ -1570,7 +1593,21 @@ bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *p
 	if (!opt_extranonce)
 		goto out;
 
-	// subscribe to extranonce (optional)
+	// If forced to BIP310 only, don't try NiceHash
+	if (opt_force_bip310_extranonce) {
+		if (opt_debug)
+			applog(LOG_DEBUG, "Forced to BIP310 only, skipping NiceHash method");
+		goto out;
+	}
+
+	// If BIP310 extranonce already succeeded and not forced to NiceHash, skip NiceHash protocol
+	if (sctx->extranonce_subscribed && !opt_force_nicehash_extranonce) {
+		if (opt_debug)
+			applog(LOG_DEBUG, "Extranonce already subscribed via BIP310, skipping NiceHash method");
+		goto out;
+	}
+
+	// Try NiceHash protocol: mining.extranonce.subscribe (fallback or forced)
 	sprintf(s, "{\"id\": 3, \"method\": \"mining.extranonce.subscribe\", \"params\": []}");
 
 	if (!stratum_send_line(sctx, s))
@@ -1615,9 +1652,10 @@ bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *p
 		// This is a response - check ID
 		int response_id = json_integer_value(json_object_get(extra, "id"));
 		if (response_id == 3) {
-			// Found our extranonce.subscribe response
+			// Found our extranonce.subscribe response (NiceHash protocol)
+			sctx->extranonce_subscribed = true;
 			if (opt_debug)
-				applog(LOG_DEBUG, "extranonce.subscribe response received");
+				applog(LOG_DEBUG, "✓ Extranonce subscription enabled (NiceHash via mining.extranonce.subscribe)");
 			json_decref(extra);
 			free(sret);
 			break;

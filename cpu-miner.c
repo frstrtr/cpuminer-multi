@@ -228,6 +228,10 @@ bool opt_redirect = true;
 bool opt_showdiff = true;
 bool opt_extranonce = true;
 bool want_longpoll = true;
+
+// Protocol testing options
+bool opt_force_nicehash_extranonce = false;  // Force NiceHash protocol only
+bool opt_force_bip310_extranonce = false;     // Force BIP310 protocol only
 bool have_longpoll = false;
 bool have_gbt = true;
 bool allow_getwork = true;
@@ -412,6 +416,8 @@ Options:\n\
       --no-gbt          disable getblocktemplate support\n\
       --no-stratum      disable X-Stratum support\n\
       --no-extranonce   disable Stratum extranonce support\n\
+      --force-nicehash  force NiceHash extranonce protocol (testing)\n\
+      --force-bip310    force BIP310 extranonce protocol (testing)\n\
       --no-redirect     ignore requests to change the URL of the mining server\n\
   -q, --quiet           disable per-thread hashmeter output\n\
       --no-color        disable colored output\n\
@@ -471,6 +477,8 @@ static struct option const options[] = {
 	{ "no-redirect", 0, NULL, 1009 },
 	{ "no-stratum", 0, NULL, 1007 },
 	{ "no-extranonce", 0, NULL, 1012 },
+	{ "force-nicehash", 0, NULL, 1070 },
+	{ "force-bip310", 0, NULL, 1071 },
 	{ "max-temp", 1, NULL, 1060 },
 	{ "max-diff", 1, NULL, 1061 },
 	{ "max-rate", 1, NULL, 1062 },
@@ -3294,6 +3302,18 @@ void parse_arg(int key, char *arg)
 		break;
 	case 1014:
 		opt_showdiff = false;
+		break;
+	case 1070:		/* --force-nicehash */
+		opt_force_nicehash_extranonce = true;
+		opt_force_bip310_extranonce = false;
+		opt_extranonce = true;
+		applog(LOG_INFO, "Forcing NiceHash extranonce protocol (mining.extranonce.subscribe)");
+		break;
+	case 1071:		/* --force-bip310 */
+		opt_force_bip310_extranonce = true;
+		opt_force_nicehash_extranonce = false;
+		opt_extranonce = true;
+		applog(LOG_INFO, "Forcing BIP310 extranonce protocol (subscribe-extranonce in mining.configure)");
 		break;
 	case 1016:			/* --coinbase-addr */
 		pk_script_size = address_to_script(pk_script, sizeof(pk_script), arg);
