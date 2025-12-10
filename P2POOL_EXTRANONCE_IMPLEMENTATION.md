@@ -450,20 +450,49 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
 - ✅ Proper response ID matching (no false "ID mismatch" errors)
 - ✅ Notification handling during response wait
 - ✅ ASICBoost/BIP320 support with correct endianness
-- ✅ **NiceHash extranonce protocol** (`mining.extranonce.subscribe`)
+- ✅ **BOTH extranonce protocols** (NiceHash + BIP310)
+- ✅ Smart fallback: Try BIP310, fallback to NiceHash
 - ✅ 6-parameter submit format
+- ✅ **Protocol testing CLI options**
 
-**Protocol Used** (NiceHash - same as ASICs):
-```c
-// Sends: {"id": 3, "method": "mining.extranonce.subscribe", "params": []}
-// Expects: {"id": 3, "result": true, "error": null}
-// Handles: {"id": null, "method": "mining.set_extranonce", "params": ["", 4]}
+**Testing Capabilities**:
+
+1. **Test Both Protocols** (default behavior):
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x
+   # Tries BIP310 first, falls back to NiceHash if not supported
+   ```
+
+2. **Test NiceHash Protocol Only** (ASIC simulation):
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x --force-nicehash
+   # Skips BIP310, only uses mining.extranonce.subscribe
+   # This is how ASICs behave!
+   ```
+
+3. **Test BIP310 Protocol Only**:
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x --force-bip310
+   # Includes subscribe-extranonce in mining.configure
+   # Skips NiceHash fallback
+   # Tests if pool correctly implements BIP310
+   ```
+
+**Protocol Details**:
+
+**NiceHash Protocol** (used by ASICs):
+```json
+→ {"id": 3, "method": "mining.extranonce.subscribe", "params": []}
+← {"id": 3, "result": true, "error": null}
+← {"id": null, "method": "mining.set_extranonce", "params": ["", 4]}
 ```
 
-**Testing Both Protocols**:
-- cpuminer-multi uses NiceHash protocol (tests ASIC compatibility)
-- For BIP310 testing, you'll need a modern GPU miner that uses `mining.configure`
-- Both should work with same P2Pool implementation (same internal logic)
+**BIP310 Protocol** (modern miners):
+```json
+→ {"id": 2, "method": "mining.configure", "params": [["subscribe-extranonce"], {}]}
+← {"id": 2, "result": {"subscribe-extranonce": true}, "error": null}
+← {"id": null, "method": "mining.set_extranonce", "params": ["", 4]}
+```
 
 **Use this miner to validate your P2Pool implementation!**
 
