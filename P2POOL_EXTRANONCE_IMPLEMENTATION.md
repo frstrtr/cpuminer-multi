@@ -37,7 +37,36 @@ Many X11 ASICs (Antminer D3, Innosilicon A5, etc.) **require** `mining.set_extra
 
 ## Required Implementation
 
-### 1. Support `mining.extranonce.subscribe` Extension
+### 1. Implement `mining.extranonce.subscribe` Method (NiceHash Protocol)
+
+**Location**: `stratum.py`, add new RPC method
+
+**Implementation** (Required for ASIC compatibility):
+```python
+def rpc_extranonce_subscribe(self):
+    """
+    Handle mining.extranonce.subscribe request (NiceHash protocol)
+    
+    This is the PRIMARY method used by ASICs to subscribe to extranonce updates.
+    Sent as a separate request AFTER mining.subscribe.
+    
+    Request: {"id": 3, "method": "mining.extranonce.subscribe", "params": []}
+    Response: {"id": 3, "result": true, "error": null}
+    
+    Returns:
+        True on success (enables extranonce updates for this connection)
+    """
+    # Enable extranonce subscription for this connection
+    self.extranonce_subscribe = True
+    print '>>>ExtranOnce subscribed (NiceHash) from %s' % (self.worker_ip)
+    
+    # Return true to indicate support
+    return True
+```
+
+**Note**: The method name in stratum.py should be `rpc_extranonce_subscribe` but the actual RPC method is `mining.extranonce.subscribe`. The framework maps `mining.X` to `rpc_X`.
+
+### 2. Support `subscribe-extranonce` in mining.configure (Optional)
 
 **Location**: `stratum.py`, `rpc_configure()` method (around line 78)
 
@@ -47,16 +76,19 @@ if 'subscribe-extranonce' in extensions:
     print 'Extension method subscribe-extranonce not implemented'
 ```
 
-**Required Change**:
+**Optional Change** (for BIP310 compatibility):
 ```python
 if 'subscribe-extranonce' in extensions:
-    # Enable extranonce subscription for this connection
+    # Enable extranonce subscription for this connection (BIP310 method)
     self.extranonce_subscribe = True
-    print '>>>ExtranOnce subscribed from %s' % (self.worker_ip)
-    # No return value needed - subscription is implicit
+    print '>>>ExtranOnce subscribed (BIP310) from %s' % (self.worker_ip)
+    # Return in result object
+    result['subscribe-extranonce'] = True
 ```
 
-### 2. Implement `mining.set_extranonce` Method
+**Priority**: Method 1 (NiceHash) is REQUIRED. Method 2 (BIP310) is optional.
+
+### 3. Implement `mining.set_extranonce` Notification Handler
 
 **Location**: `stratum.py`, add new RPC method
 
@@ -102,9 +134,9 @@ def rpc_set_extranonce(self, extranonce1, extranonce2_size):
     return True
 ```
 
-### 3. Send `mining.set_extranonce` to Subscribed Miners
+### 4. Send `mining.set_extranonce` Notifications to Subscribed Miners
 
-**Location**: `stratum.py`, in `_send_work()` or similar
+**Location**: `stratum.py`, add helper method
 
 P2Pool currently uses an empty extranonce1 (`""`), but when it changes (or periodically for ASICs), send updates:
 
@@ -134,7 +166,7 @@ def _notify_extranonce_change(self, new_extranonce1=None):
     )
 ```
 
-### 4. Periodic Extranonce Updates for ASICs
+### 5. Periodic Extranonce Updates for ASICs
 
 **Location**: `stratum.py`, in `_send_work()` method
 
@@ -169,7 +201,7 @@ def _send_work(self):
     # ... rest of existing code ...
 ```
 
-### 5. Update Initialization
+### 6. Update Initialization
 
 **Location**: `stratum.py`, `__init__()` method
 
@@ -195,9 +227,51 @@ def __init__(self, wb, other, transport):
 
 ## Protocol Specification
 
-### Mining.extranonce.subscribe Extension
+### NiceHash Extranonce Protocol
 
-**Request** (from miner in `mining.configure`):
+**IMPORTANT**: Most ASICs use the **NiceHash extranonce protocol**, NOT the `mining.configure` extension!
+
+#### Method 1: NiceHash Protocol (Required for ASIC compatibility)
+
+**Request** (sent AFTER `mining.subscribe`, separate method):
+```json
+{
+  "id": 3,
+  "method": "mining.extranonce.subscribe",
+  "params": []
+}
+```
+
+**Success Response**:
+```json
+{
+  "id": 3,
+  "result": true,
+  "error": null
+}
+```
+
+**Failure Response**:
+```json
+{
+  "id": 3,
+  "result": false,
+  "error": [20, "Not supported.", null]
+}
+```
+
+**Notification** (sent by pool when extranonce changes):
+```json
+{
+  "id": null,
+  "method": "mining.set_extranonce",
+  "params": ["08000002", 4]
+}
+```
+
+#### Method 2: BIP310 Extension (Optional, for modern miners)
+
+**Request** (in `mining.configure`):
 ```json
 {
   "id": 2,
@@ -209,7 +283,7 @@ def __init__(self, wb, other, transport):
 }
 ```
 
-**Response** (from pool):
+**Response**:
 ```json
 {
   "id": 2,
@@ -331,40 +405,55 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
 **Branch**: `asicboost-protocol-testing`  
 **Status**: ✅ Fully working with P2Pool
 
-**What's Fixed**:
-- ✅ Proper response ID matching
+**What's Implemented**:
+- ✅ Proper response ID matching (no false "ID mismatch" errors)
 - ✅ Notification handling during response wait
 - ✅ ASICBoost/BIP320 support with correct endianness
-- ✅ Extranonce subscribe support
+- ✅ **NiceHash extranonce protocol** (`mining.extranonce.subscribe`)
 - ✅ 6-parameter submit format
+
+**Protocol Used**:
+```c
+// Sends: {"id": 3, "method": "mining.extranonce.subscribe", "params": []}
+// Expects: {"id": 3, "result": true, "error": null}
+// Handles: {"id": null, "method": "mining.set_extranonce", "params": ["", 4]}
+```
 
 **Use this miner to validate your P2Pool implementation!**
 
 ## Implementation Priority
 
-### High Priority (Required for ASICs)
-1. ✅ Handle `subscribe-extranonce` in `rpc_configure()` - **15 minutes**
-2. ✅ Implement `rpc_set_extranonce()` method - **30 minutes**
-3. ✅ Send initial extranonce notification after subscription - **15 minutes**
+### Critical Priority (Required for ASIC Support)
+1. ✅ **Implement `rpc_extranonce_subscribe()` method** (NiceHash protocol) - **15 minutes**
+2. ✅ **Implement `rpc_set_extranonce()` notification handler** - **20 minutes**
+3. ✅ **Add state tracking in `__init__()`** - **5 minutes**
 
-**Estimated Time**: 1 hour
+**Estimated Time**: 40 minutes  
+**ASIC Compatibility**: ✅ Works with Antminer, Innosilicon, Baikal
 
-### Medium Priority (ASIC Optimization)
-4. ✅ Implement periodic extranonce updates - **20 minutes**
-5. ✅ Add state tracking and logging - **10 minutes**
+### High Priority (ASIC Optimization)
+4. ✅ Implement periodic extranonce updates in `_send_work()` - **20 minutes**
+5. ✅ Add helper method `_notify_extranonce_change()` - **10 minutes**
 
-**Estimated Time**: 30 minutes
+**Estimated Time**: 30 minutes  
+**Benefit**: Prevents ASIC nonce space exhaustion
+
+### Medium Priority (Modern Miner Support)
+6. ⬜ Handle `subscribe-extranonce` in `rpc_configure()` (BIP310) - **10 minutes**
+
+**Estimated Time**: 10 minutes  
+**Benefit**: Supports newer miners with BIP310 protocol
 
 ### Low Priority (Enhancement)
-6. ⬜ Implement non-empty extranonce1 (currently always empty)
-7. ⬜ Dynamic extranonce1 based on worker count
-8. ⬜ Extranonce space management
+7. ⬜ Implement non-empty extranonce1 (currently always empty)
+8. ⬜ Dynamic extranonce1 based on worker count
+9. ⬜ Extranonce space management
 
 **Estimated Time**: 2-4 hours (optional)
 
 ## Code Changes Summary
 
-### Minimum Required Changes (3 locations)
+### Minimum Required Changes (4 locations)
 
 1. **`__init__` method** - Add extranonce state tracking:
    ```python
@@ -372,19 +461,18 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
    self.extranonce1 = ""
    ```
 
-2. **`rpc_configure` method** - Handle subscription:
+2. **New method** - Handle NiceHash subscription (REQUIRED for ASICs):
    ```python
-   if 'subscribe-extranonce' in extensions:
+   def rpc_extranonce_subscribe(self):
        self.extranonce_subscribe = True
+       return True
    ```
 
-3. **New method** - Handle updates:
+3. **New method** - Handle set_extranonce notifications:
    ```python
    def rpc_set_extranonce(self, extranonce1, extranonce2_size):
        # Implementation above
    ```
-
-### Recommended Changes (2 additional locations)
 
 4. **`_send_work` method** - Periodic updates:
    ```python
@@ -392,7 +480,16 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
        # Send periodic updates
    ```
 
-5. **New helper method** - Notification sender:
+### Optional Changes (2 additional locations)
+
+5. **`rpc_configure` method** - Handle BIP310 subscription (optional):
+   ```python
+   if 'subscribe-extranonce' in extensions:
+       self.extranonce_subscribe = True
+       result['subscribe-extranonce'] = True
+   ```
+
+6. **New helper method** - Notification sender:
    ```python
    def _notify_extranonce_change(self, new_extranonce1=None):
        # Implementation above
@@ -421,6 +518,43 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
 ### For Network
 - ✅ Decentralization - ASICs can use P2Pool instead of centralized pools
 - ✅ Resilience - More hashrate on decentralized infrastructure
+
+## Critical Compatibility Notes
+
+### NiceHash Protocol vs BIP310
+
+**IMPORTANT**: ASICs use **NiceHash protocol**, NOT BIP310!
+
+| Protocol | Method | When | Used By |
+|----------|--------|------|---------|
+| **NiceHash** | `mining.extranonce.subscribe` | Separate request after `mining.subscribe` | ✅ ASICs (Antminer, Innosilicon, Baikal) |
+| BIP310 | `subscribe-extranonce` in `mining.configure` | During configuration | Modern CPU/GPU miners |
+
+**For ASIC Support**: You MUST implement `rpc_extranonce_subscribe()` method!
+
+**For Modern Miners**: Optionally support `subscribe-extranonce` in `mining.configure`
+
+### Connection Sequence
+
+**NiceHash Protocol (ASICs)**:
+```
+1. Miner → Pool: mining.subscribe
+2. Pool → Miner: response with extranonce1/extranonce2_size
+3. Miner → Pool: mining.extranonce.subscribe  ← SEPARATE REQUEST
+4. Pool → Miner: {"result": true}              ← MUST RESPOND
+5. Miner → Pool: mining.authorize
+6. Pool → Miner: response
+7. Pool → Miner: mining.set_extranonce (periodic) ← NOTIFICATIONS
+```
+
+**BIP310 Protocol (Modern miners)**:
+```
+1. Miner → Pool: mining.subscribe
+2. Pool → Miner: response
+3. Miner → Pool: mining.configure with ["subscribe-extranonce"]
+4. Pool → Miner: {"result": {"subscribe-extranonce": true}}
+5. Miner → Pool: mining.authorize
+```
 
 ## Important Note for Other Miners
 
