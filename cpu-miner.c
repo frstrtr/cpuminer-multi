@@ -232,6 +232,10 @@ bool want_longpoll = true;
 // Protocol testing options
 bool opt_force_nicehash_extranonce = false;  // Force NiceHash protocol only
 bool opt_force_bip310_extranonce = false;     // Force BIP310 protocol only
+bool opt_asicboost = true;                    // Enable ASICBoost/version-rolling
+double opt_suggest_diff = 0.0;                // Suggested difficulty (0 = disabled)
+double opt_min_diff = 0.0;                    // Minimum difficulty floor (0 = disabled)
+bool opt_version_rolling = true;              // Enable ASICBoost/version-rolling
 bool have_longpoll = false;
 bool have_gbt = true;
 bool allow_getwork = true;
@@ -416,6 +420,9 @@ Options:\n\
       --no-gbt          disable getblocktemplate support\n\
       --no-stratum      disable X-Stratum support\n\
       --no-extranonce   disable Stratum extranonce support\n\
+      --no-asicboost    disable ASICBoost/version-rolling support\n\
+      --suggest-diff=N  suggest difficulty N to pool (for CPU mining)\n\
+      --min-diff=N      request minimum difficulty N (BIP310 extension)\n\
       --force-nicehash  force NiceHash extranonce protocol (testing)\n\
       --force-bip310    force BIP310 extranonce protocol (testing)\n\
       --no-redirect     ignore requests to change the URL of the mining server\n\
@@ -477,6 +484,9 @@ static struct option const options[] = {
 	{ "no-redirect", 0, NULL, 1009 },
 	{ "no-stratum", 0, NULL, 1007 },
 	{ "no-extranonce", 0, NULL, 1012 },
+	{ "no-asicboost", 0, NULL, 1072 },
+	{ "suggest-diff", 1, NULL, 1073 },
+	{ "min-diff", 1, NULL, 1074 },
 	{ "force-nicehash", 0, NULL, 1070 },
 	{ "force-bip310", 0, NULL, 1071 },
 	{ "max-temp", 1, NULL, 1060 },
@@ -2827,21 +2837,24 @@ static void *stratum_thread(void *userdata)
 			pthread_mutex_unlock(&g_work_lock);
 			restart_threads();
 
-			if (!stratum_connect(&stratum, stratum.url)
-					|| !stratum_subscribe(&stratum)
-					|| !stratum_authorize(&stratum, rpc_user, rpc_pass)) {
-				stratum_disconnect(&stratum);
-				if (opt_retries >= 0 && ++failures > opt_retries) {
-					applog(LOG_ERR, "...terminating workio thread");
-					tq_push(thr_info[work_thr_id].q, NULL);
-					goto out;
-				}
-				if (!opt_benchmark)
-					applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
-				sleep(opt_fail_pause);
+		if (!stratum_connect(&stratum, stratum.url)
+				|| !stratum_subscribe(&stratum)
+				|| !stratum_authorize(&stratum, rpc_user, rpc_pass)) {
+			stratum_disconnect(&stratum);
+			if (opt_retries >= 0 && ++failures > opt_retries) {
+				applog(LOG_ERR, "...terminating workio thread");
+				tq_push(thr_info[work_thr_id].q, NULL);
+				goto out;
 			}
-
-			if (jsonrpc_2) {
+			if (!opt_benchmark)
+				applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
+			sleep(opt_fail_pause);
+		} else {
+			// Successfully connected - send mining.suggest_difficulty if configured
+			if (opt_suggest_diff > 0.0) {
+				stratum_suggest_difficulty(&stratum, opt_suggest_diff);
+			}
+		}			if (jsonrpc_2) {
 				work_free(&g_work);
 				work_copy(&g_work, &stratum.work);
 			}
@@ -3314,6 +3327,18 @@ void parse_arg(int key, char *arg)
 		opt_force_nicehash_extranonce = false;
 		opt_extranonce = true;
 		applog(LOG_INFO, "Forcing BIP310 extranonce protocol (subscribe-extranonce in mining.configure)");
+		break;
+	case 1072:		/* --no-asicboost */
+		opt_asicboost = false;
+		applog(LOG_INFO, "ASICBoost/version-rolling disabled");
+		break;
+	case 1073:		/* --suggest-diff */
+		opt_suggest_diff = atof(optarg);
+		applog(LOG_INFO, "Will suggest difficulty: %g", opt_suggest_diff);
+		break;
+	case 1074:		/* --min-diff */
+		opt_min_diff = atof(optarg);
+		applog(LOG_INFO, "Minimum difficulty: %g", opt_min_diff);
 		break;
 	case 1016:			/* --coinbase-addr */
 		pk_script_size = address_to_script(pk_script, sizeof(pk_script), arg);

@@ -454,6 +454,7 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
 - ✅ Smart fallback: Try BIP310, fallback to NiceHash
 - ✅ 6-parameter submit format
 - ✅ **Protocol testing CLI options**
+- ✅ **Difficulty negotiation** (mining.suggest_difficulty + minimum-difficulty)
 
 **Testing Capabilities**:
 
@@ -476,6 +477,36 @@ if (!strcasecmp(method, "mining.set_extranonce")) {
    # Includes subscribe-extranonce in mining.configure
    # Skips NiceHash fallback
    # Tests if pool correctly implements BIP310
+   ```
+
+4. **Disable ASICBoost** (test without version-rolling):
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x --no-asicboost
+   # Skips mining.configure entirely
+   # Tests pool behavior without ASICBoost
+   ```
+
+5. **Suggest Difficulty** (for CPU mining optimization):
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x --suggest-diff=0.005
+   # Sends mining.suggest_difficulty after authorization
+   # Helps pool optimize share rate for CPU hashrate
+   # For 1.1 MH/s, use ~0.0077 for 30s/share
+   ```
+
+6. **Request Minimum Difficulty** (BIP310 extension):
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x --min-diff=0.001
+   # Includes minimum-difficulty in mining.configure
+   # Tests BIP310 minimum-difficulty extension
+   ```
+
+7. **Combined Testing**:
+   ```bash
+   ./cpuminer -a x11 -o stratum+tcp://pool:port -u address -p x \
+     --suggest-diff=0.005 --min-diff=0.001
+   # Tests both difficulty negotiation features
+   # Pool should respect minimum and adjust to suggestion
    ```
 
 **Protocol Details**:

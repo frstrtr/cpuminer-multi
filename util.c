@@ -48,6 +48,10 @@ extern pthread_mutex_t stats_lock;
 extern bool opt_extranonce;
 extern bool opt_force_nicehash_extranonce;
 extern bool opt_force_bip310_extranonce;
+extern bool opt_asicboost;
+extern double opt_suggest_diff;
+extern double opt_min_diff;
+extern bool opt_version_rolling;
 
 struct data_buffer {
 	void		*buf;
@@ -1366,29 +1370,48 @@ bool stratum_configure(struct stratum_ctx *sctx)
 	if (jsonrpc_2)
 		return true;
 
+	// Skip mining.configure if version-rolling is disabled and no min-diff requested
+	if (!opt_asicboost && opt_min_diff == 0.0) {
+		if (opt_debug)
+			applog(LOG_DEBUG, "Skipping mining.configure (version-rolling disabled, no min-diff)");
+		return true;
+	}
+
 	// Initialize next_id if not set
 	if (sctx->next_id == 0)
 		sctx->next_id = 2;
 
-	// Request version-rolling and extranonce subscription (BIP310 protocol)
-	s = (char*) malloc(512);
+	// Build mining.configure request
+	s = (char*) malloc(1024);
+	char extensions[256] = {0};
+	char params[512] = {0};
+	
+	// Add extensions
+	if (opt_asicboost)
+		strcat(extensions, "\"version-rolling\"");
 	if (opt_extranonce && !opt_force_nicehash_extranonce) {
-		// Request both version-rolling and subscribe-extranonce (unless forced to NiceHash only)
-		sprintf(s,
-			"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
-			"[[\"version-rolling\", \"subscribe-extranonce\"], "
-			"{\"version-rolling.mask\": \"1fffe000\", "
-			"\"version-rolling.min-bit-count\": 2}]}",
-			sctx->next_id++);
-	} else {
-		// Request only version-rolling (extranonce disabled or forced to NiceHash)
-		sprintf(s,
-			"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
-			"[[\"version-rolling\"], "
-			"{\"version-rolling.mask\": \"1fffe000\", "
-			"\"version-rolling.min-bit-count\": 2}]}",
-			sctx->next_id++);
+		if (extensions[0]) strcat(extensions, ", ");
+		strcat(extensions, "\"subscribe-extranonce\"");
 	}
+	if (opt_min_diff > 0.0) {
+		if (extensions[0]) strcat(extensions, ", ");
+		strcat(extensions, "\"minimum-difficulty\"");
+	}
+	
+	// Add params
+	if (opt_asicboost) {
+		strcat(params, "\"version-rolling.mask\": \"1fffe000\", ");
+		strcat(params, "\"version-rolling.min-bit-count\": 2");
+	}
+	if (opt_min_diff > 0.0) {
+		if (params[0]) strcat(params, ", ");
+		sprintf(params + strlen(params), "\"minimum-difficulty.value\": %g", opt_min_diff);
+	}
+	
+	sprintf(s,
+		"{\"id\": %d, \"method\": \"mining.configure\", \"params\": "
+		"[[%s], {%s}]}",
+		sctx->next_id++, extensions, params);
 
 	int expected_id = sctx->next_id - 1; // We already incremented it in sprintf
 
@@ -1674,6 +1697,35 @@ out:
 	if (val)
 		json_decref(val);
 
+	return ret;
+}
+
+bool stratum_suggest_difficulty(struct stratum_ctx *sctx, double difficulty)
+{
+	char *s;
+	
+	if (difficulty <= 0.0) {
+		return false;
+	}
+	
+	// Initialize next_id if not set
+	if (sctx->next_id == 0)
+		sctx->next_id = 2;
+	
+	s = (char*) malloc(256);
+	sprintf(s, "{\"id\": %d, \"method\": \"mining.suggest_difficulty\", \"params\": [%g]}",
+		sctx->next_id++, difficulty);
+	
+	bool ret = stratum_send_line(sctx, s);
+	free(s);
+	
+	if (ret) {
+		applog(LOG_INFO, "Suggested difficulty: %g", difficulty);
+	} else {
+		applog(LOG_WARNING, "Failed to send mining.suggest_difficulty");
+	}
+	
+	// No need to wait for response - this is a notification to the pool
 	return ret;
 }
 

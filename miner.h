@@ -310,6 +310,10 @@ extern bool opt_quiet;
 extern bool opt_redirect;
 extern bool opt_force_nicehash_extranonce;
 extern bool opt_force_bip310_extranonce;
+extern bool opt_asicboost;
+extern double opt_suggest_diff;
+extern double opt_min_diff;
+extern bool opt_version_rolling;
 extern int opt_priority;
 extern int opt_timeout;
 extern bool want_longpoll;
@@ -477,6 +481,7 @@ void stratum_disconnect(struct stratum_ctx *sctx);
 bool stratum_subscribe(struct stratum_ctx *sctx);
 bool stratum_configure(struct stratum_ctx *sctx);
 bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *pass);
+bool stratum_suggest_difficulty(struct stratum_ctx *sctx, double difficulty);
 bool stratum_handle_method(struct stratum_ctx *sctx, const char *s);
 
 /* rpc 2.0 (xmr) */
